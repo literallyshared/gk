@@ -42,8 +42,9 @@ const SHALLOW_WATER_COLOR: Color = Color::new(0.28, 0.78, 0.9, 1.0);
 const DEEP_WATER_COLOR: Color = Color::new(0.0, 0.16, 0.38, 1.0);
 const FOAM_EDGE_COLOR: Color = Color::new(0.98, 0.99, 1.0, 1.0);
 const MIN_WATER_ALPHA: f32 = 0.3;
-const LAND_BLEND_DISTANCE: f32 = 2.0;
-const MIN_LAND_ALPHA: f32 = 0.3;
+const LAND_BLEND_DISTANCE: f32 = 3.5;
+const MIN_LAND_ALPHA: f32 = 0.85;
+const COAST_SMOOTHING_RANGE: f32 = 1.4;
 const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
@@ -130,7 +131,10 @@ impl Map {
                     fragment: TILE_FRAGMENT_SHADER,
                 },
                 MaterialParams {
-                    uniforms: vec![UniformDesc::new("shadow_alpha", UniformType::Float1)],
+                    uniforms: vec![
+                        UniformDesc::new("shadow_alpha", UniformType::Float1),
+                        UniformDesc::new("min_land_alpha", UniformType::Float1),
+                    ],
                     ..Default::default()
                 },
             ) {
@@ -168,6 +172,7 @@ impl Map {
     pub fn draw(&self, viewport: Rect) {
         self.draw_water_tiles(viewport);
         if let Some(shader) = &self.shader {
+            shader.set_uniform("min_land_alpha", MIN_LAND_ALPHA);
             gl_use_material(shader);
         }
         self.draw_land_tiles(viewport);
@@ -215,12 +220,6 @@ impl Map {
                                 / texture.height();
                             let s1 = tileset.tile_width as f32 / texture.width();
                             let t1 = tileset.tile_height as f32 / texture.height();
-                            let colors = [
-                                self.land_vertex_color(x as i32, y as i32),
-                                self.land_vertex_color(x as i32 + 1, y as i32),
-                                self.land_vertex_color(x as i32, y as i32 + 1),
-                                self.land_vertex_color(x as i32 + 1, y as i32 + 1),
-                            ];
                             let top_left_offset =
                                 *self.get_height(x, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
                             let top_right_offset =
@@ -229,31 +228,37 @@ impl Map {
                                 *self.get_height(x, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
                             let bottom_right_offset =
                                 *self.get_height(x + 1, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let offsets = [
+                                self.coast_vertex_offset(x as f32, y as f32, tileset.tile_width as f32, tileset.tile_height as f32),
+                                self.coast_vertex_offset(x as f32 + 1.0, y as f32, tileset.tile_width as f32, tileset.tile_height as f32),
+                                self.coast_vertex_offset(x as f32, y as f32 + 1.0, tileset.tile_width as f32, tileset.tile_height as f32),
+                                self.coast_vertex_offset(x as f32 + 1.0, y as f32 + 1.0, tileset.tile_width as f32, tileset.tile_height as f32),
+                            ];
                             let mesh = Mesh {
                                 indices: vec![0, 1, 3, 0, 2, 3],
                                 vertices: vec![
                                     Vertex {
-                                        position: vec3(tx, ty + top_left_offset, 0.),
+                                        position: vec3(tx + offsets[0].x, ty + top_left_offset + offsets[0].y, 0.),
                                         uv: vec2(s, t),
-                                        color: colors[0],
+                                        color: self.land_vertex_color(x as i32, y as i32),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx + tw, ty + top_right_offset, 0.),
+                                        position: vec3(tx + tw + offsets[1].x, ty + top_right_offset + offsets[1].y, 0.),
                                         uv: vec2(s + s1, t),
-                                        color: colors[1],
+                                        color: self.land_vertex_color(x as i32 + 1, y as i32),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx, ty + th + bottom_left_offset, 0.),
+                                        position: vec3(tx + offsets[2].x, ty + th + bottom_left_offset + offsets[2].y, 0.),
                                         uv: vec2(s, t + t1),
-                                        color: colors[2],
+                                        color: self.land_vertex_color(x as i32, y as i32 + 1),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx + tw, ty + th + bottom_right_offset, 0.),
+                                        position: vec3(tx + tw + offsets[3].x, ty + th + bottom_right_offset + offsets[3].y, 0.),
                                         uv: vec2(s + s1, t + t1),
-                                        color: colors[3],
+                                        color: self.land_vertex_color(x as i32 + 1, y as i32 + 1),
                                         normal: Vec4::default(),
                                     },
                                 ],
@@ -672,13 +677,26 @@ impl Map {
             return [255, 255, 255, 255];
         }
         let distance = self.sample_distance_at(x, y);
-        if distance >= LAND_BLEND_DISTANCE {
-            return [255, 255, 255, 255];
+        let normalized = (distance / LAND_BLEND_DISTANCE).clamp(0.0, 1.0);
+        let value = (normalized * 255.0) as u8;
+        [value, 0, 0, 255]
+    }
+
+    fn coast_vertex_offset(&self, x: f32, y: f32, tile_width: f32, tile_height: f32) -> Vec2 {
+        if self.distance_to_land.is_empty() {
+            return Vec2::ZERO;
         }
-        let t = (distance / LAND_BLEND_DISTANCE).clamp(0.0, 1.0);
-        let mut color = lerp_color(FOAM_EDGE_COLOR, Color::new(1.0, 1.0, 1.0, 1.0), t);
-        color.a = MIN_LAND_ALPHA + t * (1.0 - MIN_LAND_ALPHA);
-        color_to_bytes(color)
+        let distance = self.sample_distance(x, y);
+        if distance >= COAST_SMOOTHING_RANGE {
+            return Vec2::ZERO;
+        }
+        let gradient = self.distance_gradient(x, y);
+        if gradient.length_squared() < 0.0001 {
+            return Vec2::ZERO;
+        }
+        let dir = -gradient.normalize();
+        let strength = (COAST_SMOOTHING_RANGE - distance) / COAST_SMOOTHING_RANGE;
+        Vec2::new(dir.x * strength * tile_width * 0.5, dir.y * strength * tile_height * 0.5)
     }
 
     fn sample_distance_at(&self, x: i32, y: i32) -> f32 {
@@ -695,23 +713,29 @@ impl Map {
         MAX_WATER_DISTANCE
     }
 
+    fn sample_distance(&self, x: f32, y: f32) -> f32 {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let x1 = x0 + 1;
+        let y1 = y0 + 1;
+        let sx = x - x0 as f32;
+        let sy = y - y0 as f32;
+        let d00 = self.sample_distance_at(x0, y0);
+        let d10 = self.sample_distance_at(x1, y0);
+        let d01 = self.sample_distance_at(x0, y1);
+        let d11 = self.sample_distance_at(x1, y1);
+        let dx0 = d00 + (d10 - d00) * sx;
+        let dx1 = d01 + (d11 - d01) * sx;
+        dx0 + (dx1 - dx0) * sy
+    }
+
+    fn distance_gradient(&self, x: f32, y: f32) -> Vec2 {
+        let hx = self.sample_distance(x + 0.5, y) - self.sample_distance(x - 0.5, y);
+        let hy = self.sample_distance(x, y + 0.5) - self.sample_distance(x, y - 0.5);
+        vec2(hx, hy)
+    }
+
 }
-
-const TILE_FRAGMENT_SHADER: &'static str = r#"#version 330
-precision lowp float;
-uniform sampler2D Texture;
-uniform float shadow_alpha;
-
-in vec2 uv;
-in vec4 vert_color;
-
-void main() {
-    vec4 base = texture2D(Texture, uv) * vert_color;
-    float value = shadow_alpha / 255.0;
-    vec4 shadow = vec4(value, value, value, value);
-    gl_FragColor = base * shadow;
-}
-"#;
 
 const TILE_VERTEX_SHADER: &'static str = "#version 330
 attribute vec3 position;
@@ -721,14 +745,33 @@ uniform mat4 Model;
 uniform mat4 Projection;
 
 out vec2 uv;
-out vec4 vert_color;
+out float dist_factor;
 
 void main() {
     uv = texcoord;
-    vert_color = color0 / 255.0;
+    dist_factor = color0.r / 255.0;
     gl_Position = Projection * Model * vec4(position, 1);
 }
 ";
+
+const TILE_FRAGMENT_SHADER: &'static str = r#"#version 330
+precision lowp float;
+uniform sampler2D Texture;
+uniform float min_land_alpha;
+uniform float shadow_alpha;
+
+in vec2 uv;
+in float dist_factor;
+
+void main() {
+    vec4 tex_color = texture2D(Texture, uv);
+    float alpha = mix(min_land_alpha, 1.0, clamp(dist_factor, 0.0, 1.0));
+    float shadow_value = shadow_alpha / 255.0;
+    vec4 shadow = vec4(shadow_value, shadow_value, shadow_value, shadow_value);
+    gl_FragColor = vec4(tex_color.rgb, alpha) * shadow;
+}
+"#;
+
 
 const WATER_VERTEX_SHADER: &'static str = "#version 330
 attribute vec3 position;
