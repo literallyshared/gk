@@ -1,14 +1,15 @@
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::path::Path;
-use std::{collections::HashMap, fs::File};
+use std::fs::File;
 use std::io::prelude::*;
 
 use macroquad::prelude::*;
-use macroquad_tiled::TileSet;
-use tiled::{LayerType, TileLayer};
+use tiled::LayerType;
 
 #[macroquad::main("Graal Kingdoms")]
 async fn main() {
-    let map = Map::load("assets/map").await;
+    let map = Map::load("assets/offlinetutorial").await;
     loop {
         if let Some(map) = &map {
             clear_background(BLACK);
@@ -36,6 +37,33 @@ async fn main() {
 
 const TILE_HEIGHT_OFFSET: f32 = -4.0;
 const WATER_LEVEL_HEIGHT: u32 = 50;
+const MAX_WATER_DISTANCE: f32 = 12.0;
+const SHALLOW_WATER_COLOR: Color = Color::new(0.28, 0.78, 0.9, 1.0);
+const DEEP_WATER_COLOR: Color = Color::new(0.0, 0.16, 0.38, 1.0);
+const FOAM_EDGE_COLOR: Color = Color::new(0.98, 0.99, 1.0, 1.0);
+const MIN_WATER_ALPHA: f32 = 0.3;
+const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+const ALL_NEIGHBORS: [(i32, i32); 8] = [
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+];
+const DISTANCE_NEIGHBORS: [(i32, i32, f32); 8] = [
+    (-1, 0, 1.0),
+    (1, 0, 1.0),
+    (0, -1, 1.0),
+    (0, 1, 1.0),
+    (-1, -1, SQRT_2),
+    (-1, 1, SQRT_2),
+    (1, -1, SQRT_2),
+    (1, 1, SQRT_2),
+];
+const SQRT_2: f32 = 1.41421356237;
 
 pub struct Map {
     tilemap: tiled::Map,
@@ -43,7 +71,19 @@ pub struct Map {
     lightmap: Vec<f32>,
     max_height: u32,
     shader: Option<Material>,
+    water_shader: Option<Material>,
     texture: Option<Texture2D>,
+    tile_classes: Vec<TileClassification>,
+    distance_to_land: Vec<f32>,
+    distance_texture: Option<Texture2D>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileClassification {
+    Land,
+    Coast,
+    ShallowWater,
+    DeepWater,
 }
 
 impl Map {
@@ -67,7 +107,7 @@ impl Map {
         let max_height = heightmap.iter().cloned().fold(0, u32::max);
         let mut texture = macroquad::texture::load_texture("assets/picso.png").await.ok();
         if let Some(texture) = texture.as_mut() {
-            texture.set_filter(FilterMode::Nearest);
+            texture.set_filter(macroquad::texture::FilterMode::Nearest);
         }
         let mut map = Map {
             tilemap,
@@ -75,7 +115,11 @@ impl Map {
             lightmap: vec![],
             max_height,
             shader: None,
+            water_shader: None,
             texture,
+            tile_classes: vec![],
+            distance_to_land: vec![],
+            distance_texture: None,
         };
         if !map.heightmap.is_empty() {
             match load_material(
@@ -95,75 +139,194 @@ impl Map {
                 Ok(shader) => map.shader = Some(shader),
                 Err(e) => warn!("Failed to load shader: [{:?}]", e),
             }
+
+            match load_material(
+                ShaderSource::Glsl {
+                    vertex: WATER_VERTEX_SHADER,
+                    fragment: WATER_FRAGMENT_SHADER,
+                },
+                MaterialParams {
+                    uniforms: vec![
+                        UniformDesc::new("shallow_color", UniformType::Float4),
+                        UniformDesc::new("deep_color", UniformType::Float4),
+                        UniformDesc::new("foam_color", UniformType::Float4),
+                        UniformDesc::new("foam_width", UniformType::Float1),
+                        UniformDesc::new("shallow_width", UniformType::Float1),
+                        UniformDesc::new("min_alpha", UniformType::Float1),
+                        UniformDesc::new("max_distance", UniformType::Float1),
+                    ],
+                    ..Default::default()
+                },
+            ) {
+                Ok(shader) => map.water_shader = Some(shader),
+                Err(e) => warn!("Failed to load water shader: [{:?}]", e),
+            }
         }
         map.calculate_lightmap();
+        map.rebuild_tile_metadata();
         Some(map)
     }
 
     pub fn draw(&self, viewport: Rect) {
+        if let Some(shader) = &self.shader {
+            gl_use_material(shader);
+        }
+        self.draw_land_tiles(viewport);
+        gl_use_default_material();
+        self.draw_water_tiles(viewport);
+    }
+
+    fn draw_land_tiles(&self, viewport: Rect) {
+        let Some(texture) = &self.texture else {
+            return;
+        };
         let width = self.tilemap.width;
         let height = self.tilemap.height;
-        if let Some(shader) = &self.shader {
-            gl_use_material(&shader);
-        }
         let y_offset = self.max_height as f32 * TILE_HEIGHT_OFFSET;
         for layer in self.tilemap.layers() {
             if let LayerType::Tiles(tiles) = layer.layer_type() {
                 for y in 0..height {
                     for x in 0..width {
                         if let Some(tile) = tiles.get_tile(x as i32, y as i32) {
+                            let classification = self.get_tile_classification(x, y);
+                            if !matches!(
+                                classification,
+                                Some(TileClassification::Land) | Some(TileClassification::Coast)
+                            ) {
+                                continue;
+                            }
                             let tileset = tile.get_tileset();
+                            if tileset.image.is_none() {
+                                continue;
+                            }
                             let tx = x as f32 * tileset.tile_width as f32;
                             let ty = y as f32 * tileset.tile_height as f32 - y_offset;
                             let tw = tileset.tile_width as f32;
                             let th = tileset.tile_height as f32;
-                            let height_offset = self.max_height as f32 * self.get_entity_offset_per_height_unit() * th * 2.;
+                            let height_offset =
+                                self.max_height as f32 * self.get_entity_offset_per_height_unit() * th * 2.;
                             if !viewport.overlaps(&Rect::new(tx, ty - height_offset, tw, th + height_offset)) {
-                                // TODO: these height offsets arent very precise..
                                 continue;
                             }
-                            if tileset.image.is_none() {
-                                continue;
-                            }
-                            if let Some(texture) = &self.texture {
-                                let tileset_width = texture.width() / tileset.tile_width as f32;
-                                let s = (tile.id() % tileset_width as u32) as f32 * tileset.tile_width as f32 / texture.width();
-                                let t = (tile.id() / tileset_width as u32) as f32 * tileset.tile_height as f32 / texture.height();
-                                let s1 = tileset.tile_width as f32 / texture.width();
-                                let t1 = tileset.tile_height as f32 / texture.height();
-                                let top_left_offset = *self.get_height(x, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                                let top_right_offset = *self.get_height(x + 1, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                                let bottom_left_offset = *self.get_height(x, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                                let bottom_right_offset = *self.get_height(x + 1, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                                let mesh = Mesh {
-                                    indices: vec![0, 1, 3, 0, 2, 3],
-                                    vertices: vec![
-                                        Vertex { position: vec3(tx, ty + top_left_offset, 0.), uv: vec2(s, t), color: [255, 255, 255, 255], normal: Vec4::default(), },
-                                        Vertex { position: vec3(tx + tw, ty + top_right_offset, 0.), uv: vec2(s + s1, t), color: [255, 255, 255, 255], normal: Vec4::default(), },
-                                        Vertex { position: vec3(tx, ty + th + bottom_left_offset, 0.), uv: vec2(s, t + t1), color: [255, 255, 255, 255], normal: Vec4::default(), },
-                                        Vertex { position: vec3(tx + tw, ty + th + bottom_right_offset, 0.), uv: vec2(s + s1, t + t1), color: [255, 255, 255, 255], normal: Vec4::default(), },
-                                    ],
-                                    texture: Some(texture.clone()),
-                                };
-                                if let Some(shader) = &self.shader {
-                                    if let Some(light) = self.get_light(x, y) {
-                                        if let Some(height) = self.get_height(x, y) {
-                                            if *height > WATER_LEVEL_HEIGHT {
-                                                shader.set_uniform("shadow_alpha", *light);
-                                            } else {
-                                                let value = 255.0 - 10.0 * (WATER_LEVEL_HEIGHT as f32 - *height as f32);
-                                                shader.set_uniform("shadow_alpha", value);
-                                            }
+                            let tileset_width = texture.width() / tileset.tile_width as f32;
+                            let s = (tile.id() % tileset_width as u32) as f32
+                                * tileset.tile_width as f32
+                                / texture.width();
+                            let t = (tile.id() / tileset_width as u32) as f32
+                                * tileset.tile_height as f32
+                                / texture.height();
+                            let s1 = tileset.tile_width as f32 / texture.width();
+                            let t1 = tileset.tile_height as f32 / texture.height();
+                            let top_left_offset =
+                                *self.get_height(x, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let top_right_offset =
+                                *self.get_height(x + 1, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let bottom_left_offset =
+                                *self.get_height(x, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let bottom_right_offset =
+                                *self.get_height(x + 1, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let mesh = Mesh {
+                                indices: vec![0, 1, 3, 0, 2, 3],
+                                vertices: vec![
+                                    Vertex {
+                                        position: vec3(tx, ty + top_left_offset, 0.),
+                                        uv: vec2(s, t),
+                                        color: [255, 255, 255, 255],
+                                        normal: Vec4::default(),
+                                    },
+                                    Vertex {
+                                        position: vec3(tx + tw, ty + top_right_offset, 0.),
+                                        uv: vec2(s + s1, t),
+                                        color: [255, 255, 255, 255],
+                                        normal: Vec4::default(),
+                                    },
+                                    Vertex {
+                                        position: vec3(tx, ty + th + bottom_left_offset, 0.),
+                                        uv: vec2(s, t + t1),
+                                        color: [255, 255, 255, 255],
+                                        normal: Vec4::default(),
+                                    },
+                                    Vertex {
+                                        position: vec3(tx + tw, ty + th + bottom_right_offset, 0.),
+                                        uv: vec2(s + s1, t + t1),
+                                        color: [255, 255, 255, 255],
+                                        normal: Vec4::default(),
+                                    },
+                                ],
+                                texture: Some(texture.clone()),
+                            };
+                            if let Some(shader) = &self.shader {
+                                if let Some(light) = self.get_light(x, y) {
+                                    if let Some(height) = self.get_height(x, y) {
+                                        if *height > WATER_LEVEL_HEIGHT {
+                                            shader.set_uniform("shadow_alpha", *light);
+                                        } else {
+                                            let value = 255.0
+                                                - 10.0 * (WATER_LEVEL_HEIGHT as f32 - *height as f32);
+                                            shader.set_uniform("shadow_alpha", value);
                                         }
                                     }
                                 }
-                                draw_mesh(&mesh);
                             }
+                            draw_mesh(&mesh);
                         }
                     }
                 }
             }
         }
+    }
+
+    fn draw_water_tiles(&self, _viewport: Rect) {
+        let (Some(shader), Some(distance_texture)) = (&self.water_shader, &self.distance_texture) else {
+            return;
+        };
+        shader.set_uniform("shallow_color", color_to_vec4(SHALLOW_WATER_COLOR));
+        shader.set_uniform("deep_color", color_to_vec4(DEEP_WATER_COLOR));
+        shader.set_uniform("foam_color", color_to_vec4(FOAM_EDGE_COLOR));
+        shader.set_uniform("foam_width", 0.8f32);
+        shader.set_uniform("shallow_width", 2.5f32);
+        shader.set_uniform("min_alpha", MIN_WATER_ALPHA);
+        shader.set_uniform("max_distance", MAX_WATER_DISTANCE);
+        gl_use_material(shader);
+
+        let map_width = self.tilemap.width as f32 * self.tilemap.tile_width as f32;
+        let map_height = self.tilemap.height as f32 * self.tilemap.tile_height as f32;
+        let y_offset = self.max_height as f32 * TILE_HEIGHT_OFFSET;
+        let sea_offset = WATER_LEVEL_HEIGHT as f32 * TILE_HEIGHT_OFFSET;
+
+        let vertices = vec![
+            Vertex {
+                position: vec3(0.0, -y_offset + sea_offset, 0.0),
+                uv: vec2(0.0, 0.0),
+                color: [255, 255, 255, 255],
+                normal: Vec4::default(),
+            },
+            Vertex {
+                position: vec3(map_width, -y_offset + sea_offset, 0.0),
+                uv: vec2(1.0, 0.0),
+                color: [255, 255, 255, 255],
+                normal: Vec4::default(),
+            },
+            Vertex {
+                position: vec3(0.0, map_height - y_offset + sea_offset, 0.0),
+                uv: vec2(0.0, 1.0),
+                color: [255, 255, 255, 255],
+                normal: Vec4::default(),
+            },
+            Vertex {
+                position: vec3(map_width, map_height - y_offset + sea_offset, 0.0),
+                uv: vec2(1.0, 1.0),
+                color: [255, 255, 255, 255],
+                normal: Vec4::default(),
+            },
+        ];
+
+        let mesh = Mesh {
+            indices: vec![0, 1, 3, 0, 2, 3],
+            vertices,
+            texture: Some(distance_texture.clone()),
+        };
+        draw_mesh(&mesh);
         gl_use_default_material();
     }
 
@@ -180,6 +343,19 @@ impl Map {
             self.tilemap.width as f32 * self.tilemap.tile_width as f32,
             self.tilemap.height as f32 * self.tilemap.tile_height as f32,
         )
+    }
+
+    pub fn get_tile_classification(&self, x: u32, y: u32) -> Option<TileClassification> {
+        if self.tile_classes.is_empty() {
+            return Some(TileClassification::Land);
+        }
+        let index = self.try_index(x as i32, y as i32)?;
+        self.tile_classes.get(index).copied()
+    }
+
+    pub fn get_water_distance(&self, x: u32, y: u32) -> Option<f32> {
+        let index = self.try_index(x as i32, y as i32)?;
+        self.distance_to_land.get(index).copied()
     }
 
     pub fn position_to_tile_coordinates(&self, x: f32, y: f32) -> (u32, u32) {
@@ -323,6 +499,170 @@ impl Map {
         }
         self.lightmap = lightmap;
     }
+
+    fn rebuild_tile_metadata(&mut self) {
+        if self.heightmap.len() != self.get_size() {
+            self.tile_classes.clear();
+            self.distance_to_land.clear();
+            self.distance_texture = None;
+            return;
+        }
+        self.distance_to_land = self.calculate_distance_to_land();
+        self.upload_distance_texture();
+        self.tile_classes = self.classify_tiles();
+    }
+
+    fn calculate_distance_to_land(&self) -> Vec<f32> {
+        self.calculate_distance_field(|height| height >= WATER_LEVEL_HEIGHT)
+    }
+
+    fn calculate_distance_field<F>(&self, mut source_predicate: F) -> Vec<f32>
+    where
+        F: FnMut(u32) -> bool,
+    {
+        #[derive(Copy, Clone)]
+        struct State {
+            cost: f32,
+            index: usize,
+        }
+        impl PartialEq for State {
+            fn eq(&self, other: &Self) -> bool {
+                self.cost.eq(&other.cost)
+            }
+        }
+        impl Eq for State {}
+        impl PartialOrd for State {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                other.cost.partial_cmp(&self.cost)
+            }
+        }
+        impl Ord for State {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.partial_cmp(other).unwrap_or(Ordering::Equal)
+            }
+        }
+
+        let mut distance = vec![f32::INFINITY; self.get_size()];
+        let mut heap = BinaryHeap::new();
+        for index in 0..self.get_size() {
+            if source_predicate(self.heightmap[index]) {
+                distance[index] = 0.0;
+                heap.push(State { cost: 0.0, index });
+            }
+        }
+        while let Some(State { cost, index }) = heap.pop() {
+            if cost > distance[index] {
+                continue;
+            }
+            let (x, y) = self.index_to_x_y(index);
+            for (dx, dy, weight) in DISTANCE_NEIGHBORS {
+                if let Some(neighbor_index) = self.try_index(x as i32 + dx, y as i32 + dy) {
+                    let next = cost + weight;
+                    if next < distance[neighbor_index] {
+                        distance[neighbor_index] = next;
+                        heap.push(State {
+                            cost: next,
+                            index: neighbor_index,
+                        });
+                    }
+                }
+            }
+        }
+        distance
+    }
+
+    fn upload_distance_texture(&mut self) {
+        if self.distance_to_land.is_empty() {
+            self.distance_texture = None;
+            return;
+        }
+        let width = self.tilemap.width as u16;
+        let height = self.tilemap.height as u16;
+        let mut image = Image::gen_image_color(width, height, Color::new(0.0, 0.0, 0.0, 1.0));
+        let scale = if MAX_WATER_DISTANCE > 0.0 {
+            1.0 / MAX_WATER_DISTANCE
+        } else {
+            1.0
+        };
+        for y in 0..height {
+            for x in 0..width {
+                let index = self.x_y_to_index(x as usize, y as usize);
+                let distance = self.distance_to_land.get(index).copied().unwrap_or(f32::INFINITY);
+                let normalized = if distance.is_finite() {
+                    (distance * scale).min(1.0)
+                } else {
+                    1.0
+                };
+                image.set_pixel(
+                    x as u32,
+                    y as u32,
+                    Color::new(normalized, normalized, normalized, 1.0),
+                );
+            }
+        }
+        let texture = Texture2D::from_image(&image);
+        texture.set_filter(FilterMode::Linear);
+        self.distance_texture = Some(texture);
+    }
+
+    fn classify_tiles(&self) -> Vec<TileClassification> {
+        let mut classes = vec![TileClassification::Land; self.get_size()];
+        for index in 0..self.get_size() {
+            let (x, y) = self.index_to_x_y(index);
+            let height = self.heightmap[index];
+            if height < WATER_LEVEL_HEIGHT {
+                let distance = self.distance_to_land.get(index).copied().unwrap_or(f32::INFINITY);
+                if distance <= 2.5 {
+                    classes[index] = TileClassification::ShallowWater;
+                } else {
+                    classes[index] = TileClassification::DeepWater;
+                }
+            } else if self.has_water_neighbor(x as u32, y as u32) {
+                classes[index] = TileClassification::Coast;
+            } else {
+                classes[index] = TileClassification::Land;
+            }
+        }
+        classes
+    }
+
+    fn has_water_neighbor(&self, x: u32, y: u32) -> bool {
+        for (dx, dy) in ALL_NEIGHBORS {
+            if self.is_water_tile(x as i32 + dx, y as i32 + dy) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_water_tile(&self, x: i32, y: i32) -> bool {
+        if let Some(height) = self.get_height_at(x, y) {
+            height < WATER_LEVEL_HEIGHT
+        } else {
+            false
+        }
+    }
+
+    fn get_height_at(&self, x: i32, y: i32) -> Option<u32> {
+        let index = self.try_index(x, y)?;
+        self.heightmap.get(index).copied()
+    }
+
+    fn try_index(&self, x: i32, y: i32) -> Option<usize> {
+        if self.in_bounds(x, y) {
+            Some(y as usize * self.tilemap.width as usize + x as usize)
+        } else {
+            None
+        }
+    }
+
+    fn in_bounds(&self, x: i32, y: i32) -> bool {
+        x >= 0
+            && y >= 0
+            && x < self.tilemap.width as i32
+            && y < self.tilemap.height as i32
+    }
+
 }
 
 const TILE_FRAGMENT_SHADER: &'static str = r#"#version 330
@@ -359,3 +699,64 @@ void main() {
     gl_Position = Projection * Model * vec4(position, 1);
 }
 ";
+
+const WATER_VERTEX_SHADER: &'static str = "#version 330
+attribute vec3 position;
+attribute vec2 texcoord;
+uniform mat4 Model;
+uniform mat4 Projection;
+
+out vec2 uv;
+
+void main() {
+    uv = texcoord;
+    gl_Position = Projection * Model * vec4(position, 1);
+}
+";
+
+const WATER_FRAGMENT_SHADER: &'static str = r#"#version 330
+precision mediump float;
+uniform vec4 shallow_color;
+uniform vec4 deep_color;
+uniform vec4 foam_color;
+uniform float foam_width;
+uniform float shallow_width;
+uniform float min_alpha;
+uniform float max_distance;
+uniform sampler2D Texture;
+
+in vec2 uv;
+
+void main() {
+    float encoded = texture2D(Texture, uv).r;
+    float distance = encoded * max_distance;
+    float shallow_mix = smoothstep(0.0, shallow_width, distance);
+    vec3 water_color = mix(shallow_color.rgb, deep_color.rgb, shallow_mix);
+    float foam_factor = 1.0 - smoothstep(0.0, foam_width, distance);
+    vec3 final_color = mix(water_color, foam_color.rgb, foam_factor);
+    float depth_alpha = mix(1.0, min_alpha, clamp(distance / max_distance, 0.0, 1.0));
+    gl_FragColor = vec4(final_color, depth_alpha);
+}
+"#;
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    Color::new(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
+}
+
+fn color_to_bytes(color: Color) -> [u8; 4] {
+    [
+        (color.r.clamp(0.0, 1.0) * 255.0) as u8,
+        (color.g.clamp(0.0, 1.0) * 255.0) as u8,
+        (color.b.clamp(0.0, 1.0) * 255.0) as u8,
+        (color.a.clamp(0.0, 1.0) * 255.0) as u8,
+    ]
+}
+
+fn color_to_vec4(color: Color) -> (f32, f32, f32, f32) {
+    (color.r, color.g, color.b, color.a)
+}
