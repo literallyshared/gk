@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 crate::message_definitions! {
     pub enum FromServer {
-        opcode => ClientOpcode;
+        opcode => ServerOpcode;
         Handshake(Handshake) = 0x8000;
     }
 }
