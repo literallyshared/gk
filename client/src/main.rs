@@ -9,7 +9,7 @@ use tiled::LayerType;
 
 #[macroquad::main("Graal Kingdoms")]
 async fn main() {
-    let map = Map::load("assets/offlinetutorial").await;
+    let map = Map::load("assets/map").await;
     loop {
         if let Some(map) = &map {
             clear_background(BLACK);
@@ -42,6 +42,8 @@ const SHALLOW_WATER_COLOR: Color = Color::new(0.28, 0.78, 0.9, 1.0);
 const DEEP_WATER_COLOR: Color = Color::new(0.0, 0.16, 0.38, 1.0);
 const FOAM_EDGE_COLOR: Color = Color::new(0.98, 0.99, 1.0, 1.0);
 const MIN_WATER_ALPHA: f32 = 0.3;
+const LAND_BLEND_DISTANCE: f32 = 2.0;
+const MIN_LAND_ALPHA: f32 = 0.3;
 const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
@@ -128,11 +130,7 @@ impl Map {
                     fragment: TILE_FRAGMENT_SHADER,
                 },
                 MaterialParams {
-                    uniforms: vec![
-                        UniformDesc::new("tile_size", UniformType::Float2),
-                        UniformDesc::new("tile_coord", UniformType::Float2),
-                        UniformDesc::new("shadow_alpha", UniformType::Float1),
-                    ],
+                    uniforms: vec![UniformDesc::new("shadow_alpha", UniformType::Float1)],
                     ..Default::default()
                 },
             ) {
@@ -168,12 +166,12 @@ impl Map {
     }
 
     pub fn draw(&self, viewport: Rect) {
+        self.draw_water_tiles(viewport);
         if let Some(shader) = &self.shader {
             gl_use_material(shader);
         }
         self.draw_land_tiles(viewport);
         gl_use_default_material();
-        self.draw_water_tiles(viewport);
     }
 
     fn draw_land_tiles(&self, viewport: Rect) {
@@ -217,6 +215,12 @@ impl Map {
                                 / texture.height();
                             let s1 = tileset.tile_width as f32 / texture.width();
                             let t1 = tileset.tile_height as f32 / texture.height();
+                            let colors = [
+                                self.land_vertex_color(x as i32, y as i32),
+                                self.land_vertex_color(x as i32 + 1, y as i32),
+                                self.land_vertex_color(x as i32, y as i32 + 1),
+                                self.land_vertex_color(x as i32 + 1, y as i32 + 1),
+                            ];
                             let top_left_offset =
                                 *self.get_height(x, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
                             let top_right_offset =
@@ -231,25 +235,25 @@ impl Map {
                                     Vertex {
                                         position: vec3(tx, ty + top_left_offset, 0.),
                                         uv: vec2(s, t),
-                                        color: [255, 255, 255, 255],
+                                        color: colors[0],
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
                                         position: vec3(tx + tw, ty + top_right_offset, 0.),
                                         uv: vec2(s + s1, t),
-                                        color: [255, 255, 255, 255],
+                                        color: colors[1],
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
                                         position: vec3(tx, ty + th + bottom_left_offset, 0.),
                                         uv: vec2(s, t + t1),
-                                        color: [255, 255, 255, 255],
+                                        color: colors[2],
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
                                         position: vec3(tx + tw, ty + th + bottom_right_offset, 0.),
                                         uv: vec2(s + s1, t + t1),
-                                        color: [255, 255, 255, 255],
+                                        color: colors[3],
                                         normal: Vec4::default(),
                                     },
                                 ],
@@ -663,25 +667,49 @@ impl Map {
             && y < self.tilemap.height as i32
     }
 
+    fn land_vertex_color(&self, x: i32, y: i32) -> [u8; 4] {
+        if self.distance_to_land.is_empty() {
+            return [255, 255, 255, 255];
+        }
+        let distance = self.sample_distance_at(x, y);
+        if distance >= LAND_BLEND_DISTANCE {
+            return [255, 255, 255, 255];
+        }
+        let t = (distance / LAND_BLEND_DISTANCE).clamp(0.0, 1.0);
+        let mut color = lerp_color(FOAM_EDGE_COLOR, Color::new(1.0, 1.0, 1.0, 1.0), t);
+        color.a = MIN_LAND_ALPHA + t * (1.0 - MIN_LAND_ALPHA);
+        color_to_bytes(color)
+    }
+
+    fn sample_distance_at(&self, x: i32, y: i32) -> f32 {
+        if self.distance_to_land.is_empty() {
+            return MAX_WATER_DISTANCE;
+        }
+        if let Some(index) = self.try_index(x, y) {
+            if let Some(distance) = self.distance_to_land.get(index) {
+                if distance.is_finite() {
+                    return distance.min(MAX_WATER_DISTANCE);
+                }
+            }
+        }
+        MAX_WATER_DISTANCE
+    }
+
 }
 
 const TILE_FRAGMENT_SHADER: &'static str = r#"#version 330
 precision lowp float;
-uniform vec2 tile_size;
-uniform vec2 tile_coord;
 uniform sampler2D Texture;
-uniform sampler2D heightmap;
-
 uniform float shadow_alpha;
 
 in vec2 uv;
+in vec4 vert_color;
 
 void main() {
-    vec4 color = texture2D(Texture, uv);
-    //vec4 shadow = vec4(0.6, 0.6, 0.6, 1.0);
-    float value = shadow_alpha / 255;
+    vec4 base = texture2D(Texture, uv) * vert_color;
+    float value = shadow_alpha / 255.0;
     vec4 shadow = vec4(value, value, value, value);
-    gl_FragColor = color * shadow; //texture2D(Texture, uv);
+    gl_FragColor = base * shadow;
 }
 "#;
 
@@ -693,9 +721,11 @@ uniform mat4 Model;
 uniform mat4 Projection;
 
 out vec2 uv;
+out vec4 vert_color;
 
 void main() {
     uv = texcoord;
+    vert_color = color0 / 255.0;
     gl_Position = Projection * Model * vec4(position, 1);
 }
 ";
