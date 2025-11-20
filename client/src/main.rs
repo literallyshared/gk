@@ -9,6 +9,7 @@ use tiled::LayerType;
 
 #[macroquad::main("Graal Kingdoms")]
 async fn main() {
+    macroquad::window::request_new_screen_size(1024., 920.);
     let map = Map::load("assets/map").await;
     loop {
         if let Some(map) = &map {
@@ -41,10 +42,13 @@ const MAX_WATER_DISTANCE: f32 = 12.0;
 const SHALLOW_WATER_COLOR: Color = Color::new(0.28, 0.78, 0.9, 1.0);
 const DEEP_WATER_COLOR: Color = Color::new(0.0, 0.16, 0.38, 1.0);
 const FOAM_EDGE_COLOR: Color = Color::new(0.98, 0.99, 1.0, 1.0);
-const MIN_WATER_ALPHA: f32 = 0.3;
+const MIN_WATER_ALPHA: f32 = 0.9;
 const LAND_BLEND_DISTANCE: f32 = 3.5;
 const MIN_LAND_ALPHA: f32 = 0.85;
-const COAST_SMOOTHING_RANGE: f32 = 1.4;
+const COAST_SMOOTHING_RANGE: f32 = 2.4;
+const COAST_OFFSET_SCALE: f32 = 0.7;
+const COAST_SUBDIV: usize = 3;
+const COAST_BLEND_DISTANCE: f32 = 2.5;
 const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
@@ -79,6 +83,7 @@ pub struct Map {
     tile_classes: Vec<TileClassification>,
     distance_to_land: Vec<f32>,
     distance_texture: Option<Texture2D>,
+    vertex_offsets: Vec<Vec2>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +128,7 @@ impl Map {
             tile_classes: vec![],
             distance_to_land: vec![],
             distance_texture: None,
+            vertex_offsets: vec![],
         };
         if !map.heightmap.is_empty() {
             match load_material(
@@ -228,12 +234,7 @@ impl Map {
                                 *self.get_height(x, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
                             let bottom_right_offset =
                                 *self.get_height(x + 1, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                            let offsets = [
-                                self.coast_vertex_offset(x as f32, y as f32, tileset.tile_width as f32, tileset.tile_height as f32),
-                                self.coast_vertex_offset(x as f32 + 1.0, y as f32, tileset.tile_width as f32, tileset.tile_height as f32),
-                                self.coast_vertex_offset(x as f32, y as f32 + 1.0, tileset.tile_width as f32, tileset.tile_height as f32),
-                                self.coast_vertex_offset(x as f32 + 1.0, y as f32 + 1.0, tileset.tile_width as f32, tileset.tile_height as f32),
-                            ];
+                            let offsets = self.quad_vertex_offsets(x, y);
                             let mesh = Mesh {
                                 indices: vec![0, 1, 3, 0, 2, 3],
                                 vertices: vec![
@@ -514,10 +515,12 @@ impl Map {
             self.tile_classes.clear();
             self.distance_to_land.clear();
             self.distance_texture = None;
+            self.vertex_offsets.clear();
             return;
         }
         self.distance_to_land = self.calculate_distance_to_land();
         self.upload_distance_texture();
+        self.vertex_offsets = self.calculate_vertex_offsets();
         self.tile_classes = self.classify_tiles();
     }
 
@@ -682,11 +685,50 @@ impl Map {
         [value, 0, 0, 255]
     }
 
+    fn quad_vertex_offsets(&self, x: u32, y: u32) -> [Vec2; 4] {
+        if self.vertex_offsets.is_empty() {
+            return [Vec2::ZERO; 4];
+        }
+        let w = self.tilemap.width as usize + 1;
+        let idx = |vx: usize, vy: usize| vy * w + vx;
+        [
+            self.vertex_offsets[idx(x as usize, y as usize)],
+            self.vertex_offsets[idx(x as usize + 1, y as usize)],
+            self.vertex_offsets[idx(x as usize, y as usize + 1)],
+            self.vertex_offsets[idx(x as usize + 1, y as usize + 1)],
+        ]
+    }
+
+    fn calculate_vertex_offsets(&self) -> Vec<Vec2> {
+        if self.distance_to_land.is_empty() {
+            return vec![];
+        }
+        let width = self.tilemap.width as usize;
+        let height = self.tilemap.height as usize;
+        let mut offsets = vec![Vec2::ZERO; (width + 1) * (height + 1)];
+        for y in 0..=height {
+            for x in 0..=width {
+                let is_border = x == 0 || y == 0 || x == width || y == height;
+                offsets[y * (width + 1) + x] = if is_border {
+                    Vec2::ZERO
+                } else {
+                    self.coast_vertex_offset(
+                        x as f32,
+                        y as f32,
+                        self.tilemap.tile_width as f32,
+                        self.tilemap.tile_height as f32,
+                    )
+                };
+            }
+        }
+        offsets
+    }
+
     fn coast_vertex_offset(&self, x: f32, y: f32, tile_width: f32, tile_height: f32) -> Vec2 {
         if self.distance_to_land.is_empty() {
             return Vec2::ZERO;
         }
-        let distance = self.sample_distance(x, y);
+        let distance = self.sample_distance_continuous(x, y);
         if distance >= COAST_SMOOTHING_RANGE {
             return Vec2::ZERO;
         }
@@ -695,31 +737,42 @@ impl Map {
             return Vec2::ZERO;
         }
         let dir = -gradient.normalize();
-        let strength = (COAST_SMOOTHING_RANGE - distance) / COAST_SMOOTHING_RANGE;
-        Vec2::new(dir.x * strength * tile_width * 0.5, dir.y * strength * tile_height * 0.5)
+        let strength = ((COAST_SMOOTHING_RANGE - distance) / COAST_SMOOTHING_RANGE).powf(1.2);
+        Vec2::new(
+            dir.x * strength * tile_width * COAST_OFFSET_SCALE,
+            dir.y * strength * tile_height * COAST_OFFSET_SCALE,
+        )
     }
 
-    fn sample_distance_at(&self, x: i32, y: i32) -> f32 {
+    fn sample_distance_at(&self, mut x: i32, mut y: i32) -> f32 {
         if self.distance_to_land.is_empty() {
             return MAX_WATER_DISTANCE;
         }
-        if let Some(index) = self.try_index(x, y) {
-            if let Some(distance) = self.distance_to_land.get(index) {
-                if distance.is_finite() {
-                    return distance.min(MAX_WATER_DISTANCE);
-                }
+        let max_x = self.tilemap.width as i32 - 1;
+        let max_y = self.tilemap.height as i32 - 1;
+        x = x.clamp(0, max_x);
+        y = y.clamp(0, max_y);
+        let index = (y as usize * self.tilemap.width as usize + x as usize)
+            .min(self.distance_to_land.len().saturating_sub(1));
+        if let Some(distance) = self.distance_to_land.get(index) {
+            if distance.is_finite() {
+                return distance.min(MAX_WATER_DISTANCE);
             }
         }
         MAX_WATER_DISTANCE
     }
 
-    fn sample_distance(&self, x: f32, y: f32) -> f32 {
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let x1 = x0 + 1;
-        let y1 = y0 + 1;
-        let sx = x - x0 as f32;
-        let sy = y - y0 as f32;
+    fn sample_distance_continuous(&self, x: f32, y: f32) -> f32 {
+        let map_width = self.tilemap.width as f32;
+        let map_height = self.tilemap.height as f32;
+        let clamped_x = x.clamp(0.0, map_width - 1.0);
+        let clamped_y = y.clamp(0.0, map_height - 1.0);
+        let x0 = clamped_x.floor() as i32;
+        let y0 = clamped_y.floor() as i32;
+        let x1 = (x0 + 1).min(self.tilemap.width as i32 - 1);
+        let y1 = (y0 + 1).min(self.tilemap.height as i32 - 1);
+        let sx = clamped_x - x0 as f32;
+        let sy = clamped_y - y0 as f32;
         let d00 = self.sample_distance_at(x0, y0);
         let d10 = self.sample_distance_at(x1, y0);
         let d01 = self.sample_distance_at(x0, y1);
@@ -730,9 +783,22 @@ impl Map {
     }
 
     fn distance_gradient(&self, x: f32, y: f32) -> Vec2 {
-        let hx = self.sample_distance(x + 0.5, y) - self.sample_distance(x - 0.5, y);
-        let hy = self.sample_distance(x, y + 0.5) - self.sample_distance(x, y - 0.5);
-        vec2(hx, hy)
+        let s = 0.35;
+        let d_right = self.sample_distance_continuous(x + s, y);
+        let d_left = self.sample_distance_continuous(x - s, y);
+        let d_up = self.sample_distance_continuous(x, y + s);
+        let d_down = self.sample_distance_continuous(x, y - s);
+        let d_up_right = self.sample_distance_continuous(x + s, y + s);
+        let d_up_left = self.sample_distance_continuous(x - s, y + s);
+        let d_down_right = self.sample_distance_continuous(x + s, y - s);
+        let d_down_left = self.sample_distance_continuous(x - s, y - s);
+        let gx = (d_right - d_left) * 0.5
+            + (d_up_right - d_up_left) * 0.25
+            + (d_down_right - d_down_left) * 0.25;
+        let gy = (d_up - d_down) * 0.5
+            + (d_up_right - d_down_right) * 0.25
+            + (d_up_left - d_down_left) * 0.25;
+        vec2(gx, gy)
     }
 
 }
@@ -832,4 +898,40 @@ fn color_to_bytes(color: Color) -> [u8; 4] {
 
 fn color_to_vec4(color: Color) -> (f32, f32, f32, f32) {
     (color.r, color.g, color.b, color.a)
+}
+
+fn marching_squares_edges(mask: u8) -> Vec<[[usize; 2]; 2]> {
+    match mask {
+        0 | 15 => vec![],
+        1 => vec![[[0, 1], [0, 3]]],
+        2 => vec![[[0, 1], [1, 2]]],
+        3 => vec![[[0, 3], [1, 2]]],
+        4 => vec![[[1, 2], [2, 3]]],
+        5 => vec![[[0, 1], [1, 2]], [[0, 3], [2, 3]]],
+        6 => vec![[[0, 1], [2, 3]]],
+        7 => vec![[[0, 3], [2, 3]]],
+        8 => vec![[[0, 3], [2, 3]]],
+        9 => vec![[[0, 1], [2, 3]]],
+        10 => vec![[[0, 1], [0, 3]], [[1, 2], [2, 3]]],
+        11 => vec![[[1, 2], [2, 3]]],
+        12 => vec![[[0, 3], [1, 2]]],
+        13 => vec![[[0, 1], [1, 2]]],
+        14 => vec![[[0, 1], [0, 3]]],
+        _ => vec![],
+    }
+}
+
+fn interpolate_edge(edge: [usize; 2], d0: f32, d1: f32, iso: f32) -> Vec2 {
+    let t = if (d1 - d0).abs() > 0.0001 {
+        (iso - d0) / (d1 - d0)
+    } else {
+        0.5
+    };
+    match edge[0] {
+        0 => vec2(t, 0.0),
+        1 => vec2(1.0, t),
+        2 => vec2(1.0 - t, 1.0),
+        3 => vec2(0.0, 1.0 - t),
+        _ => Vec2::ZERO,
+    }
 }
