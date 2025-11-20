@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::path::Path;
 use std::fs::File;
 use std::io::prelude::*;
+use std::path::Path;
 
 use macroquad::prelude::*;
 use tiled::LayerType;
@@ -47,6 +47,7 @@ const LAND_BLEND_DISTANCE: f32 = 3.5;
 const MIN_LAND_ALPHA: f32 = 0.85;
 const COAST_SMOOTHING_RANGE: f32 = 2.4;
 const COAST_OFFSET_SCALE: f32 = 0.7;
+const COAST_CORNER_PULL: f32 = 0.98;
 const COAST_SUBDIV: usize = 3;
 const COAST_BLEND_DISTANCE: f32 = 2.5;
 const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
@@ -113,7 +114,9 @@ impl Map {
             vec![]
         };
         let max_height = heightmap.iter().cloned().fold(0, u32::max);
-        let mut texture = macroquad::texture::load_texture("assets/picso.png").await.ok();
+        let mut texture = macroquad::texture::load_texture("assets/picso.png")
+            .await
+            .ok();
         if let Some(texture) = texture.as_mut() {
             texture.set_filter(macroquad::texture::FilterMode::Nearest);
         }
@@ -212,9 +215,16 @@ impl Map {
                             let ty = y as f32 * tileset.tile_height as f32 - y_offset;
                             let tw = tileset.tile_width as f32;
                             let th = tileset.tile_height as f32;
-                            let height_offset =
-                                self.max_height as f32 * self.get_entity_offset_per_height_unit() * th * 2.;
-                            if !viewport.overlaps(&Rect::new(tx, ty - height_offset, tw, th + height_offset)) {
+                            let height_offset = self.max_height as f32
+                                * self.get_entity_offset_per_height_unit()
+                                * th
+                                * 2.;
+                            if !viewport.overlaps(&Rect::new(
+                                tx,
+                                ty - height_offset,
+                                tw,
+                                th + height_offset,
+                            )) {
                                 continue;
                             }
                             let tileset_width = texture.width() / tileset.tile_width as f32;
@@ -228,36 +238,54 @@ impl Map {
                             let t1 = tileset.tile_height as f32 / texture.height();
                             let top_left_offset =
                                 *self.get_height(x, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                            let top_right_offset =
-                                *self.get_height(x + 1, y).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                            let bottom_left_offset =
-                                *self.get_height(x, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
-                            let bottom_right_offset =
-                                *self.get_height(x + 1, y + 1).unwrap_or(&0) as f32 * TILE_HEIGHT_OFFSET;
+                            let top_right_offset = *self.get_height(x + 1, y).unwrap_or(&0) as f32
+                                * TILE_HEIGHT_OFFSET;
+                            let bottom_left_offset = *self.get_height(x, y + 1).unwrap_or(&0)
+                                as f32
+                                * TILE_HEIGHT_OFFSET;
+                            let bottom_right_offset = *self.get_height(x + 1, y + 1).unwrap_or(&0)
+                                as f32
+                                * TILE_HEIGHT_OFFSET;
                             let offsets = self.quad_vertex_offsets(x, y);
                             let mesh = Mesh {
                                 indices: vec![0, 1, 3, 0, 2, 3],
                                 vertices: vec![
                                     Vertex {
-                                        position: vec3(tx + offsets[0].x, ty + top_left_offset + offsets[0].y, 0.),
+                                        position: vec3(
+                                            tx + offsets[0].x,
+                                            ty + top_left_offset + offsets[0].y,
+                                            0.,
+                                        ),
                                         uv: vec2(s, t),
                                         color: self.land_vertex_color(x as i32, y as i32),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx + tw + offsets[1].x, ty + top_right_offset + offsets[1].y, 0.),
+                                        position: vec3(
+                                            tx + tw + offsets[1].x,
+                                            ty + top_right_offset + offsets[1].y,
+                                            0.,
+                                        ),
                                         uv: vec2(s + s1, t),
                                         color: self.land_vertex_color(x as i32 + 1, y as i32),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx + offsets[2].x, ty + th + bottom_left_offset + offsets[2].y, 0.),
+                                        position: vec3(
+                                            tx + offsets[2].x,
+                                            ty + th + bottom_left_offset + offsets[2].y,
+                                            0.,
+                                        ),
                                         uv: vec2(s, t + t1),
                                         color: self.land_vertex_color(x as i32, y as i32 + 1),
                                         normal: Vec4::default(),
                                     },
                                     Vertex {
-                                        position: vec3(tx + tw + offsets[3].x, ty + th + bottom_right_offset + offsets[3].y, 0.),
+                                        position: vec3(
+                                            tx + tw + offsets[3].x,
+                                            ty + th + bottom_right_offset + offsets[3].y,
+                                            0.,
+                                        ),
                                         uv: vec2(s + s1, t + t1),
                                         color: self.land_vertex_color(x as i32 + 1, y as i32 + 1),
                                         normal: Vec4::default(),
@@ -272,7 +300,8 @@ impl Map {
                                             shader.set_uniform("shadow_alpha", *light);
                                         } else {
                                             let value = 255.0
-                                                - 10.0 * (WATER_LEVEL_HEIGHT as f32 - *height as f32);
+                                                - 10.0
+                                                    * (WATER_LEVEL_HEIGHT as f32 - *height as f32);
                                             shader.set_uniform("shadow_alpha", value);
                                         }
                                     }
@@ -287,7 +316,8 @@ impl Map {
     }
 
     fn draw_water_tiles(&self, _viewport: Rect) {
-        let (Some(shader), Some(distance_texture)) = (&self.water_shader, &self.distance_texture) else {
+        let (Some(shader), Some(distance_texture)) = (&self.water_shader, &self.distance_texture)
+        else {
             return;
         };
         shader.set_uniform("shallow_color", color_to_vec4(SHALLOW_WATER_COLOR));
@@ -424,8 +454,11 @@ impl Map {
 
     pub fn get_height(&self, x: u32, y: u32) -> Option<&u32> {
         let total_indices = self.tilemap.width * self.tilemap.height;
-        if self.heightmap.len() < total_indices as usize{
-            warn!("Heightmap dimensions are not aligned with map dimensions: [{total_indices}] vs [{}]", self.heightmap.len());
+        if self.heightmap.len() < total_indices as usize {
+            warn!(
+                "Heightmap dimensions are not aligned with map dimensions: [{total_indices}] vs [{}]",
+                self.heightmap.len()
+            );
             return None;
         }
         let index = (y * self.tilemap.width + x) % total_indices;
@@ -434,7 +467,7 @@ impl Map {
 
     pub fn get_light(&self, x: u32, y: u32) -> Option<&f32> {
         let total_indices = self.tilemap.width * self.tilemap.height;
-        if self.lightmap.len() < total_indices as usize{
+        if self.lightmap.len() < total_indices as usize {
             warn!("Heightmap dimensions are not aligned with map dimensions.");
             return None;
         }
@@ -491,7 +524,7 @@ impl Map {
                 let (x, y) = self.index_to_x_y(i);
                 if let Some(neighbor_height) = self.get_height(x as u32 - 1, y as u32 - 1) {
                     let shadow = lightmap[self.x_y_to_index(x - 1, y - 1)];
-                    let shadow_slope =  (shadow - *neighbor_height as f32) * 0.8;
+                    let shadow_slope = (shadow - *neighbor_height as f32) * 0.8;
                     let value = (*neighbor_height as f32).max(shadow) - shadow_slope;
                     lightmap[i] = value;
                 } else {
@@ -599,7 +632,11 @@ impl Map {
         for y in 0..height {
             for x in 0..width {
                 let index = self.x_y_to_index(x as usize, y as usize);
-                let distance = self.distance_to_land.get(index).copied().unwrap_or(f32::INFINITY);
+                let distance = self
+                    .distance_to_land
+                    .get(index)
+                    .copied()
+                    .unwrap_or(f32::INFINITY);
                 let normalized = if distance.is_finite() {
                     (distance * scale).min(1.0)
                 } else {
@@ -623,7 +660,11 @@ impl Map {
             let (x, y) = self.index_to_x_y(index);
             let height = self.heightmap[index];
             if height < WATER_LEVEL_HEIGHT {
-                let distance = self.distance_to_land.get(index).copied().unwrap_or(f32::INFINITY);
+                let distance = self
+                    .distance_to_land
+                    .get(index)
+                    .copied()
+                    .unwrap_or(f32::INFINITY);
                 if distance <= 2.5 {
                     classes[index] = TileClassification::ShallowWater;
                 } else {
@@ -669,10 +710,7 @@ impl Map {
     }
 
     fn in_bounds(&self, x: i32, y: i32) -> bool {
-        x >= 0
-            && y >= 0
-            && x < self.tilemap.width as i32
-            && y < self.tilemap.height as i32
+        x >= 0 && y >= 0 && x < self.tilemap.width as i32 && y < self.tilemap.height as i32
     }
 
     fn land_vertex_color(&self, x: i32, y: i32) -> [u8; 4] {
@@ -712,9 +750,9 @@ impl Map {
                 offsets[y * (width + 1) + x] = if is_border {
                     Vec2::ZERO
                 } else {
-                    self.coast_vertex_offset(
-                        x as f32,
-                        y as f32,
+                    self.corner_pull_offset(
+                        x,
+                        y,
                         self.tilemap.tile_width as f32,
                         self.tilemap.tile_height as f32,
                     )
@@ -724,23 +762,41 @@ impl Map {
         offsets
     }
 
-    fn coast_vertex_offset(&self, x: f32, y: f32, tile_width: f32, tile_height: f32) -> Vec2 {
-        if self.distance_to_land.is_empty() {
+    fn corner_pull_offset(&self, vx: usize, vy: usize, tile_width: f32, tile_height: f32) -> Vec2 {
+        let vx_i = vx as i32;
+        let vy_i = vy as i32;
+        let tiles = [
+            self.is_water_tile(vx_i - 1, vy_i - 1), // nw
+            self.is_water_tile(vx_i, vy_i - 1),     // ne
+            self.is_water_tile(vx_i - 1, vy_i),     // sw
+            self.is_water_tile(vx_i, vy_i),         // se
+        ];
+        let water_count = tiles.iter().filter(|t| **t).count();
+        if water_count == 0 || water_count == 4 {
             return Vec2::ZERO;
         }
-        let distance = self.sample_distance_continuous(x, y);
-        if distance >= COAST_SMOOTHING_RANGE {
+
+        let mut push = Vec2::ZERO;
+        if tiles[0] {
+            push += vec2(1.0, 1.0);
+        }
+        if tiles[1] {
+            push += vec2(-1.0, 1.0);
+        }
+        if tiles[2] {
+            push += vec2(1.0, -1.0);
+        }
+        if tiles[3] {
+            push += vec2(-1.0, -1.0);
+        }
+        if push.length_squared() < 0.0001 {
             return Vec2::ZERO;
         }
-        let gradient = self.distance_gradient(x, y);
-        if gradient.length_squared() < 0.0001 {
-            return Vec2::ZERO;
-        }
-        let dir = -gradient.normalize();
-        let strength = ((COAST_SMOOTHING_RANGE - distance) / COAST_SMOOTHING_RANGE).powf(1.2);
+        let dir = push.normalize();
+        let strength = (water_count as f32 / 3.0).min(1.0) * COAST_CORNER_PULL;
         Vec2::new(
-            dir.x * strength * tile_width * COAST_OFFSET_SCALE,
-            dir.y * strength * tile_height * COAST_OFFSET_SCALE,
+            dir.x * tile_width * strength,
+            dir.y * tile_height * strength,
         )
     }
 
@@ -800,7 +856,6 @@ impl Map {
             + (d_up_left - d_down_left) * 0.25;
         vec2(gx, gy)
     }
-
 }
 
 const TILE_VERTEX_SHADER: &'static str = "#version 330
@@ -837,7 +892,6 @@ void main() {
     gl_FragColor = vec4(tex_color.rgb, alpha) * shadow;
 }
 "#;
-
 
 const WATER_VERTEX_SHADER: &'static str = "#version 330
 attribute vec3 position;
