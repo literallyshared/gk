@@ -93,7 +93,7 @@ pub enum TileClassification {
 
 impl Map {
     pub async fn load(map_path: &str) -> Option<Map> {
-        let tilemap_path = format!("{}.tmx", map_path);
+        let tilemap_path = format!("{map_path}.tmx");
         if !Path::new(&tilemap_path).exists() {
             error!("Tilemap not found: {}", tilemap_path);
             return None;
@@ -103,7 +103,7 @@ impl Map {
         } else {
             return None;
         };
-        let heightmap_path = format!("{}.heightmap", map_path);
+        let heightmap_path = format!("{map_path}.heightmap",);
         let heightmap = if Path::new(&heightmap_path).exists() {
             Self::load_heightmap(&heightmap_path)
         } else {
