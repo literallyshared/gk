@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::f32;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
@@ -45,12 +46,7 @@ const FOAM_EDGE_COLOR: Color = Color::new(0.98, 0.99, 1.0, 1.0);
 const MIN_WATER_ALPHA: f32 = 0.9;
 const LAND_BLEND_DISTANCE: f32 = 3.5;
 const MIN_LAND_ALPHA: f32 = 0.85;
-const COAST_SMOOTHING_RANGE: f32 = 2.4;
-const COAST_OFFSET_SCALE: f32 = 0.7;
 const COAST_CORNER_PULL: f32 = 0.98;
-const COAST_SUBDIV: usize = 3;
-const COAST_BLEND_DISTANCE: f32 = 2.5;
-const CARDINAL_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -71,7 +67,7 @@ const DISTANCE_NEIGHBORS: [(i32, i32, f32); 8] = [
     (1, -1, SQRT_2),
     (1, 1, SQRT_2),
 ];
-const SQRT_2: f32 = 1.41421356237;
+const SQRT_2: f32 = f32::consts::SQRT_2;
 
 pub struct Map {
     tilemap: tiled::Map,
@@ -817,48 +813,9 @@ impl Map {
         }
         MAX_WATER_DISTANCE
     }
-
-    fn sample_distance_continuous(&self, x: f32, y: f32) -> f32 {
-        let map_width = self.tilemap.width as f32;
-        let map_height = self.tilemap.height as f32;
-        let clamped_x = x.clamp(0.0, map_width - 1.0);
-        let clamped_y = y.clamp(0.0, map_height - 1.0);
-        let x0 = clamped_x.floor() as i32;
-        let y0 = clamped_y.floor() as i32;
-        let x1 = (x0 + 1).min(self.tilemap.width as i32 - 1);
-        let y1 = (y0 + 1).min(self.tilemap.height as i32 - 1);
-        let sx = clamped_x - x0 as f32;
-        let sy = clamped_y - y0 as f32;
-        let d00 = self.sample_distance_at(x0, y0);
-        let d10 = self.sample_distance_at(x1, y0);
-        let d01 = self.sample_distance_at(x0, y1);
-        let d11 = self.sample_distance_at(x1, y1);
-        let dx0 = d00 + (d10 - d00) * sx;
-        let dx1 = d01 + (d11 - d01) * sx;
-        dx0 + (dx1 - dx0) * sy
-    }
-
-    fn distance_gradient(&self, x: f32, y: f32) -> Vec2 {
-        let s = 0.35;
-        let d_right = self.sample_distance_continuous(x + s, y);
-        let d_left = self.sample_distance_continuous(x - s, y);
-        let d_up = self.sample_distance_continuous(x, y + s);
-        let d_down = self.sample_distance_continuous(x, y - s);
-        let d_up_right = self.sample_distance_continuous(x + s, y + s);
-        let d_up_left = self.sample_distance_continuous(x - s, y + s);
-        let d_down_right = self.sample_distance_continuous(x + s, y - s);
-        let d_down_left = self.sample_distance_continuous(x - s, y - s);
-        let gx = (d_right - d_left) * 0.5
-            + (d_up_right - d_up_left) * 0.25
-            + (d_down_right - d_down_left) * 0.25;
-        let gy = (d_up - d_down) * 0.5
-            + (d_up_right - d_down_right) * 0.25
-            + (d_up_left - d_down_left) * 0.25;
-        vec2(gx, gy)
-    }
 }
 
-const TILE_VERTEX_SHADER: &'static str = "#version 330
+const TILE_VERTEX_SHADER: &str = "#version 330
 attribute vec3 position;
 attribute vec2 texcoord;
 attribute vec4 color0;
@@ -875,7 +832,7 @@ void main() {
 }
 ";
 
-const TILE_FRAGMENT_SHADER: &'static str = r#"#version 330
+const TILE_FRAGMENT_SHADER: &str = r#"#version 330
 precision lowp float;
 uniform sampler2D Texture;
 uniform float min_land_alpha;
@@ -893,7 +850,7 @@ void main() {
 }
 "#;
 
-const WATER_VERTEX_SHADER: &'static str = "#version 330
+const WATER_VERTEX_SHADER: &str = "#version 330
 attribute vec3 position;
 attribute vec2 texcoord;
 uniform mat4 Model;
@@ -907,7 +864,7 @@ void main() {
 }
 ";
 
-const WATER_FRAGMENT_SHADER: &'static str = r#"#version 330
+const WATER_FRAGMENT_SHADER: & str = r#"#version 330
 precision mediump float;
 uniform vec4 shallow_color;
 uniform vec4 deep_color;
@@ -932,60 +889,6 @@ void main() {
 }
 "#;
 
-fn lerp_color(a: Color, b: Color, t: f32) -> Color {
-    Color::new(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a + (b.a - a.a) * t,
-    )
-}
-
-fn color_to_bytes(color: Color) -> [u8; 4] {
-    [
-        (color.r.clamp(0.0, 1.0) * 255.0) as u8,
-        (color.g.clamp(0.0, 1.0) * 255.0) as u8,
-        (color.b.clamp(0.0, 1.0) * 255.0) as u8,
-        (color.a.clamp(0.0, 1.0) * 255.0) as u8,
-    ]
-}
-
 fn color_to_vec4(color: Color) -> (f32, f32, f32, f32) {
     (color.r, color.g, color.b, color.a)
-}
-
-fn marching_squares_edges(mask: u8) -> Vec<[[usize; 2]; 2]> {
-    match mask {
-        0 | 15 => vec![],
-        1 => vec![[[0, 1], [0, 3]]],
-        2 => vec![[[0, 1], [1, 2]]],
-        3 => vec![[[0, 3], [1, 2]]],
-        4 => vec![[[1, 2], [2, 3]]],
-        5 => vec![[[0, 1], [1, 2]], [[0, 3], [2, 3]]],
-        6 => vec![[[0, 1], [2, 3]]],
-        7 => vec![[[0, 3], [2, 3]]],
-        8 => vec![[[0, 3], [2, 3]]],
-        9 => vec![[[0, 1], [2, 3]]],
-        10 => vec![[[0, 1], [0, 3]], [[1, 2], [2, 3]]],
-        11 => vec![[[1, 2], [2, 3]]],
-        12 => vec![[[0, 3], [1, 2]]],
-        13 => vec![[[0, 1], [1, 2]]],
-        14 => vec![[[0, 1], [0, 3]]],
-        _ => vec![],
-    }
-}
-
-fn interpolate_edge(edge: [usize; 2], d0: f32, d1: f32, iso: f32) -> Vec2 {
-    let t = if (d1 - d0).abs() > 0.0001 {
-        (iso - d0) / (d1 - d0)
-    } else {
-        0.5
-    };
-    match edge[0] {
-        0 => vec2(t, 0.0),
-        1 => vec2(1.0, t),
-        2 => vec2(1.0 - t, 1.0),
-        3 => vec2(0.0, 1.0 - t),
-        _ => Vec2::ZERO,
-    }
 }
