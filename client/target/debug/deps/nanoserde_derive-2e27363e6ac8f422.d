@@ -1,0 +1,10 @@
+/home/felisa/.personal/dev/gk/client/./target/debug/deps/nanoserde_derive-2e27363e6ac8f422.d: /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/lib.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/shared.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_bin.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_ron.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_json.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/parse.rs
+
+/home/felisa/.personal/dev/gk/client/./target/debug/deps/libnanoserde_derive-2e27363e6ac8f422.so: /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/lib.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/shared.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_bin.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_ron.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_json.rs /home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/parse.rs
+
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/lib.rs:
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/shared.rs:
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_bin.rs:
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_ron.rs:
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/serde_json.rs:
+/home/felisa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nanoserde-derive-0.1.22/src/parse.rs:

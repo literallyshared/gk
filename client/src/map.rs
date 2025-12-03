@@ -18,6 +18,12 @@ const MIN_WATER_ALPHA: f32 = 0.9;
 const LAND_BLEND_DISTANCE: f32 = 3.5;
 const MIN_LAND_ALPHA: f32 = 0.85;
 const COAST_CORNER_PULL: f32 = 0.98;
+const SUN_DIRECTION: Vec3 = Vec3::from_array([-0.55, -0.35, 0.75]);
+const SUN_AMBIENT: f32 = 0.55;
+const SUN_DIFFUSE: f32 = 0.7;
+const SUN_ELEVATION_TAN: f32 = 0.55;
+const SHADOW_STEPS: i32 = 10;
+const SHADOW_STEP: f32 = 1.0;
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -485,28 +491,20 @@ impl Map {
         if self.heightmap.is_empty() {
             return;
         }
-        let shadow_weight = 15.0;
-        let mut lightmap = vec![0.0; self.get_size()];
+        let mut lightmap = vec![255.0; self.get_size()];
         for i in 0..self.get_size() {
-            if self.heightmap[i] > WATER_LEVEL_HEIGHT - 2 {
-                let (x, y) = self.index_to_x_y(i);
-                if let Some(neighbor_height) = self.get_height(x as u32 - 1, y as u32 - 1) {
-                    let shadow = lightmap[self.x_y_to_index(x - 1, y - 1)];
-                    let shadow_slope = (shadow - *neighbor_height as f32) * 0.8;
-                    let value = (*neighbor_height as f32).max(shadow) - shadow_slope;
-                    lightmap[i] = value;
-                } else {
-                    warn!("Lightmap calculation failed.");
-                    return;
-                }
-            }
-        }
-        for i in 0..self.get_size() {
-            if lightmap[i] > self.heightmap[i] as f32 {
-                lightmap[i] = 255.0 - shadow_weight * (lightmap[i] - self.heightmap[i] as f32);
-            } else {
+            let (x, y) = self.index_to_x_y(i);
+            let height = self.heightmap[i] as f32;
+            if height < WATER_LEVEL_HEIGHT as f32 {
                 lightmap[i] = 255.0;
+                continue;
             }
+            let normal = self.tile_normal(x as i32, y as i32);
+            let sun_dir = SUN_DIRECTION.normalize();
+            let diffuse = normal.dot(sun_dir).max(0.0);
+            let shadow = self.shadow_factor(x as i32, y as i32, height);
+            let lighting = (SUN_AMBIENT + diffuse * SUN_DIFFUSE) * shadow;
+            lightmap[i] = (lighting.clamp(0.0, 1.0) * 255.0).round();
         }
         self.lightmap = lightmap;
     }
@@ -768,6 +766,51 @@ impl Map {
         )
     }
 
+    fn tile_normal(&self, x: i32, y: i32) -> Vec3 {
+        let center = self.get_height_at(x, y).unwrap_or(0) as f32;
+        let left = self.get_height_at(x - 1, y).unwrap_or(center as u32) as f32;
+        let right = self.get_height_at(x + 1, y).unwrap_or(center as u32) as f32;
+        let up = self.get_height_at(x, y - 1).unwrap_or(center as u32) as f32;
+        let down = self.get_height_at(x, y + 1).unwrap_or(center as u32) as f32;
+        let sx = self.tilemap.tile_width as f32;
+        let sy = self.tilemap.tile_height as f32;
+        let dzdx = (right - left) * TILE_HEIGHT_OFFSET / sx;
+        let dzdy = (down - up) * TILE_HEIGHT_OFFSET / sy;
+        let n = vec3(-dzdx, -dzdy, 1.0);
+        let len = n.length();
+        if len > 0.0001 {
+            n / len
+        } else {
+            vec3(0.0, 0.0, 1.0)
+        }
+    }
+
+    fn shadow_factor(&self, x: i32, y: i32, height: f32) -> f32 {
+        // Keep beaches bright; skip shadowing at or just above water.
+        if height <= WATER_LEVEL_HEIGHT as f32 + 1.0 {
+            return 1.0;
+        }
+        let mut pos = vec2(x as f32 + 0.5, y as f32 + 0.5);
+        let dir2d = vec2(SUN_DIRECTION.x, SUN_DIRECTION.y).normalize();
+        let mut shadow = 1.0;
+        for step in 1..=SHADOW_STEPS {
+            pos += dir2d * SHADOW_STEP;
+            let sx = pos.x.round() as i32;
+            let sy = pos.y.round() as i32;
+            if !self.in_bounds(sx, sy) {
+                break;
+            }
+            if let Some(h) = self.get_height_at(sx, sy) {
+                let expected = height - step as f32 * SUN_ELEVATION_TAN;
+                if h as f32 > expected {
+                    shadow = 0.8;
+                    break;
+                }
+            }
+        }
+        shadow
+    }
+
     fn sample_distance_at(&self, mut x: i32, mut y: i32) -> f32 {
         if self.distance_to_land.is_empty() {
             return MAX_WATER_DISTANCE;
@@ -836,7 +879,7 @@ void main() {
 }
 ";
 
-const WATER_FRAGMENT_SHADER: & str = r#"#version 330
+const WATER_FRAGMENT_SHADER: &str = r#"#version 330
 precision mediump float;
 uniform vec4 shallow_color;
 uniform vec4 deep_color;

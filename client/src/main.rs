@@ -7,10 +7,8 @@ struct CommandLineArgs {
 
 impl CommandLineArgs {
     pub fn parse(args: Vec<String>) -> Self {
-        let offline_mode= args.contains(&"--offline".to_string());
-        Self {
-            offline_mode,
-        }
+        let offline_mode = args.contains(&"--offline".to_string());
+        Self { offline_mode }
     }
 }
 

@@ -1,6 +1,9 @@
 use bevy_ecs::prelude::*;
 
-use crate::{ecs::resources::{CurrentMap, Viewport}, map::Map};
+use crate::{
+    ecs::resources::{CurrentMap, Viewport},
+    map::Map,
+};
 
 pub struct PlayingState {
     world: World,
