@@ -24,6 +24,8 @@ const SUN_DIFFUSE: f32 = 0.7;
 const SUN_ELEVATION_TAN: f32 = 0.55;
 const SHADOW_STEPS: i32 = 10;
 const SHADOW_STEP: f32 = 1.0;
+const SHADOW_BLUR_RADIUS: i32 = 1;
+const SHADOW_BLUR_PASSES: usize = 2;
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -506,7 +508,12 @@ impl Map {
             let lighting = (SUN_AMBIENT + diffuse * SUN_DIFFUSE) * shadow;
             lightmap[i] = (lighting.clamp(0.0, 1.0) * 255.0).round();
         }
-        self.lightmap = lightmap;
+        // Soften hard tile edges.
+        let mut blurred = lightmap;
+        for _ in 0..SHADOW_BLUR_PASSES {
+            blurred = self.blur_lightmap(&blurred, SHADOW_BLUR_RADIUS);
+        }
+        self.lightmap = blurred;
     }
 
     fn rebuild_tile_metadata(&mut self) {
@@ -809,6 +816,37 @@ impl Map {
             }
         }
         shadow
+    }
+
+    fn blur_lightmap(&self, input: &[f32], radius: i32) -> Vec<f32> {
+        let width = self.tilemap.width as i32;
+        let height = self.tilemap.height as i32;
+        let mut output = vec![0.0; input.len()];
+        let kernel_size = (2 * radius + 1) * (2 * radius + 1);
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = 0.0;
+                let mut count = 0;
+                for ky in -radius..=radius {
+                    for kx in -radius..=radius {
+                        let sx = (x + kx).clamp(0, width - 1);
+                        let sy = (y + ky).clamp(0, height - 1);
+                        let idx = sy as usize * self.tilemap.width as usize + sx as usize;
+                        if let Some(v) = input.get(idx) {
+                            sum += *v;
+                            count += 1;
+                        }
+                    }
+                }
+                let idx = y as usize * self.tilemap.width as usize + x as usize;
+                output[idx] = if count > 0 {
+                    sum / count as f32
+                } else {
+                    input[idx]
+                };
+            }
+        }
+        output
     }
 
     fn sample_distance_at(&self, mut x: i32, mut y: i32) -> f32 {
