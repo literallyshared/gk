@@ -10,3 +10,4 @@ tokio-util = { version = "0.7.16", features = ["codec"] }
 tiled = "0.14.0"
 macroquad = "0.4.14"
 macroquad-tiled = "0.2.1"
+bevy_ecs = "0.17.3"

@@ -1,9 +1,27 @@
 use client::map::Map;
 use macroquad::prelude::*;
 
+struct CommandLineArgs {
+    pub offline_mode: bool,
+}
+
+impl CommandLineArgs {
+    pub fn parse(args: Vec<String>) -> Self {
+        let offline_mode= args.contains(&"--offline".to_string());
+        Self {
+            offline_mode,
+        }
+    }
+}
+
 #[macroquad::main("Graal Kingdoms")]
 async fn main() {
-    macroquad::window::request_new_screen_size(1024., 920.);
+    info!("Starting Graal Kingdoms client");
+    let args: Vec<String> = std::env::args().collect();
+    let args = CommandLineArgs::parse(args);
+
+    macroquad::window::request_new_screen_size(1024., 768.);
+    // TODO: pass asset path
     let map = Map::load("client/assets/map").await;
     loop {
         if let Some(map) = &map {

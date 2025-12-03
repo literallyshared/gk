@@ -81,7 +81,8 @@ impl Map {
             vec![]
         };
         let max_height = heightmap.iter().cloned().fold(0, u32::max);
-        let mut texture = macroquad::texture::load_texture("assets/picso.png")
+        // TODO: handle tilesets properly not just picso
+        let mut texture = macroquad::texture::load_texture("client/assets/picso.png")
             .await
             .ok();
         if let Some(texture) = texture.as_mut() {
