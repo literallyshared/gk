@@ -1614,6 +1614,7 @@ dependencies = [
  "dashmap",
  "futures",
  "log",
+ "nalgebra",
  "parry2d",
  "serde",
  "serde_json",

@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::{HashMap, HashSet}, hash::Hash};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct Cell(pub (i32, i32));
 
-pub struct Grid<T: Copy> {
+pub struct Grid<T: Copy + Eq + Hash> {
     cell_size: f32,
     cells: HashMap<Cell, Vec<T>>,
 }
 
-impl<T: Copy> Grid<T> {
+impl<T: Copy + Eq + Hash> Grid<T> {
     pub fn new(cell_size: f32) -> Self {
         Self {
             cell_size,
@@ -33,6 +33,20 @@ impl<T: Copy> Grid<T> {
             }
         }
     }
+
+    pub fn query(&self, x: f32, y: f32, w: f32, h: f32) -> HashSet<T> {
+        let mut result = HashSet::default();
+        let min = self.cell_of(x - w / 2.0, y - h / 2.0);
+        let max = self.cell_of(x + w / 2.0 - f32::EPSILON, y + h / 2.0 - f32::EPSILON);
+        for x in min.0.0..=max.0.0 {
+            for y in min.0.1..=max.0.1 {
+                if let Some(list) = self.cells.get(&Cell((x, y))) {
+                    result.extend(list.iter().copied());
+                }
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -55,5 +69,16 @@ mod test {
         grid.insert(2, -0.25, -0.25, 0.5, 0.5);
         assert_eq!(grid.cells.len(), 1);
         assert_eq!(grid.cells.get(&Cell((-1, -1))).unwrap().as_slice(), &[2]);
+    }
+
+    #[test]
+    fn query_returns_items_in_overlapping_cells() {
+        let mut grid: Grid<u32> = Grid::new(1.0);
+        grid.insert(1, 0.0, 0.0, 0.5, 0.5);
+        grid.insert(2, 1.0, 1.0, 0.5, 0.5);
+        let hits = grid.query(0.5, 0.5, 2.0, 2.0);
+        assert!(hits.contains(&1));
+        assert!(hits.contains(&2));
+        assert_eq!(hits.len(), 2);
     }
 }

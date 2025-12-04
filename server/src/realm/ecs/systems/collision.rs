@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
+use parry2d::bounding_volume::Aabb;
+use shared::collision::Grid;
 
 use crate::realm::ecs::components::{Collider, CurrentMap, Position};
 
@@ -15,7 +17,12 @@ pub fn resolve_collisions(
         per_map.entry(map).or_default().push((entity, position, collider));
     }
     for (_, entities) in per_map {
-        for (position, collider, _) in entities {
+        let mut grid: Grid<Entity> = Grid::new(10.0);
+        let mut aabbs = HashMap::default();
+        for (entity, position, collider) in entities {
+            let mins = parry2d::na::point!(position.x - collider.w / 2.0, position.y - collider.h / 2.0);
+            let maxs = parry2d::na::point!(position.x + collider.w / 2.0, position.y + collider.h / 2.0);
+            aabbs.insert(entity, Aabb::new(mins, maxs));
         }
     }
 }
